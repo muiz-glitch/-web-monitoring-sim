@@ -1,94 +1,138 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const simulator = require('./deviceSimulator');
+const express = require("express");
+const http = require("http");
+const path = require("path");
+const { Server } = require("socket.io");
+const ping = require("ping");
+const devicesList = require("./simulator/devices");
 
+const PORT = process.env.PORT || 3000;
+const POLL_INTERVAL_MS = process.env.POLL_INTERVAL_MS ? Number(process.env.POLL_INTERVAL_MS) : 2000;
+const HISTORY_MAX_SAMPLES = process.env.HISTORY_MAX_SAMPLES ? Number(process.env.HISTORY_MAX_SAMPLES) : 300;
+const LOGS_MAX = 2000;
+// If SIMULATE=true, we won't call ping and will simulate online/offline
+const SIMULATE = process.env.SIMULATE === "true";
+
+// Express setup
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-const PORT = process.env.PORT || 3000;
-
+// Serve static frontend
+app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
-app.use(express.static('public'));
 
-// In-memory history and logs
-const MAX_HISTORY = 200;
-const history = {}; // deviceId -> [{ts, status, bandwidth}]
-const logs = []; // {ts, level, message, deviceId?}
+// In-memory data stores for demo
+const devices = devicesList.map(d => ({
+  ...d,
+  status: "unknown",
+  bandwidthIn: 0,
+  bandwidthOut: 0
+}));
+const histories = {}; // deviceId -> [{ts, in, out, status}]
+const logs = []; // [{ts, level, deviceId, message}]
 
-// initialize history containers
-simulator.getDevices().forEach(d => { history[d.id] = []; });
+devices.forEach(d => { histories[d.id] = []; });
+
+// Helper: push log (keeps bounded)
+function pushLog(entry) {
+  logs.push(entry);
+  if (logs.length > LOGS_MAX) logs.shift();
+}
 
 // REST endpoints
-app.get('/api/devices', (req, res) => {
-  res.json({ devices: simulator.getDevices(), ts: Date.now() });
+app.get("/api/devices", (req, res) => {
+  res.json(devices);
 });
 
-app.get('/api/history/:deviceId', (req, res) => {
-  const id = req.params.deviceId;
-  if (!history[id]) return res.status(404).json({ error: 'device not found' });
-  res.json({ deviceId: id, history: history[id] });
+app.get("/api/devices/:id/history", (req, res) => {
+  const id = req.params.id;
+  if (!histories[id]) return res.status(404).json({ error: "device not found" });
+  res.json(histories[id]);
 });
 
-app.get('/api/logs', (req, res) => {
-  // return recent logs
-  res.json({ logs: logs.slice(-200) });
+app.get("/api/logs", (req, res) => {
+  // last logs
+  res.json(logs.slice(-500));
 });
 
-// Demo control endpoints (not required, but handy)
-app.post('/api/force/:deviceId/:status', (req, res) => {
-  const { deviceId, status } = req.params;
-  if (!['online', 'offline'].includes(status)) return res.status(400).json({ error: 'bad status' });
-  const ok = simulator.forceStatus(deviceId, status);
-  if (!ok) return res.status(404).json({ error: 'device not found' });
-  res.json({ ok: true, deviceId, status });
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// Socket.IO: send initial snapshot on connect
+io.on("connection", socket => {
+  console.log(`[socket] client connected: ${socket.id}`);
+  socket.emit("snapshot", { devices, logs: logs.slice(-200) });
+  socket.on("disconnect", reason => {
+    console.log(`[socket] client disconnected: ${socket.id} (${reason})`);
+  });
 });
 
-// Socket.IO connections
-io.on('connection', (socket) => {
-  // send current snapshot and recent logs on connect
-  socket.emit('snapshot', { devices: simulator.getDevices(), ts: Date.now() });
-  socket.emit('logs', { logs: logs.slice(-200) });
+// Monitoring loop
+async function pollOnce() {
+  const now = Date.now();
+  for (const d of devices) {
+    // simulate bandwidth as small random walk
+    const inDelta = (Math.random() - 0.5) * 8; // Mbps change
+    const outDelta = (Math.random() - 0.5) * 6;
+    d.bandwidthIn = Math.max(0, Math.round((d.bandwidthIn + inDelta) * 100) / 100);
+    d.bandwidthOut = Math.max(0, Math.round((d.bandwidthOut + outDelta) * 100) / 100);
 
-  socket.on('getHistory', (deviceId) => {
-    if (!history[deviceId]) {
-      socket.emit('history', { deviceId, history: [] });
+    // Determine reachability: ping unless SIMULATE
+    let alive = false;
+    if (SIMULATE) {
+      // simulate occasional flapping for demo
+      const rnd = Math.random();
+      if (rnd > 0.05) alive = true; // mostly up
+      else alive = false;
     } else {
-      socket.emit('history', { deviceId, history: history[deviceId] });
+      try {
+        // ping.promise.probe uses system ping binary; timeout in seconds
+        const res = await ping.promise.probe(d.ip, { timeout: 1 });
+        alive = !!res.alive;
+      } catch (err) {
+        alive = false;
+      }
     }
-  });
-});
+    const prevStatus = d.status;
+    d.status = alive ? "online" : "offline";
 
-// Wire simulator events to history/logs and emit to clients
-simulator.on('snapshot', payload => {
-  const ts = payload.timestamp || Date.now();
-  // update history
-  payload.devices.forEach(d => {
-    if (!history[d.id]) history[d.id] = [];
-    history[d.id].push({ ts, status: d.status, bandwidth: d.bandwidth });
-    if (history[d.id].length > MAX_HISTORY) history[d.id].shift();
-  });
-  // broadcast to sockets
-  io.emit('deviceSnapshot', payload);
-});
+    // Create sample and append to history
+    const sample = { ts: now, in: d.bandwidthIn, out: d.bandwidthOut, status: d.status };
+    histories[d.id].push(sample);
+    if (histories[d.id].length > HISTORY_MAX_SAMPLES) histories[d.id].shift();
 
-simulator.on('statusChange', evt => {
-  const entry = {
-    ts: evt.timestamp || Date.now(),
-    level: evt.newStatus === 'offline' ? 'alert' : 'info',
-    message: `${evt.name} (${evt.ip}) changed: ${evt.oldStatus} → ${evt.newStatus}`,
-    deviceId: evt.id
-  };
-  logs.push(entry);
-  if (logs.length > 1000) logs.shift();
-  io.emit('log', entry);
-});
+    // Emit realtime device update
+    io.emit("device:update", { id: d.id, sample, device: { id: d.id, name: d.name, ip: d.ip, status: d.status, bandwidthIn: d.bandwidthIn, bandwidthOut: d.bandwidthOut } });
 
-// start polling simulator
-const POLL_INTERVAL_MS = 2000;
-setInterval(() => simulator.tick(), POLL_INTERVAL_MS);
+    // Status change log
+    if (prevStatus !== d.status) {
+      const message = `Device ${d.name} (${d.ip}) changed status ${prevStatus} -> ${d.status}`;
+      const entry = { ts: now, level: d.status === "online" ? "info" : "critical", deviceId: d.id, message };
+      pushLog(entry);
+      io.emit("log:new", entry);
+      console.log("[alert]", message);
+    }
 
+    // Bandwidth threshold alert
+    const highThreshold = 80; // Mbps
+    if (d.bandwidthIn > highThreshold || d.bandwidthOut > highThreshold) {
+      const message = `High bandwidth on ${d.name}: in=${d.bandwidthIn} Mbps out=${d.bandwidthOut} Mbps`;
+      const entry = { ts: now, level: "warning", deviceId: d.id, message };
+      pushLog(entry);
+      io.emit("log:new", entry);
+      console.log("[warning]", message);
+    }
+  }
+}
+
+// Start poll loop
+setInterval(() => {
+  pollOnce().catch(err => console.error("poll error:", err));
+}, POLL_INTERVAL_MS);
+
+// initial immediate poll
+pollOnce().catch(err => console.error("initial poll error:", err));
+
+// Start server
 server.listen(PORT, () => {
-  console.log(`Web Monitoring app listening on http://localhost:${PORT}`);
+  console.log(`Server listening on http://localhost:${PORT} (SIMULATE=${SIMULATE})`);
 });
