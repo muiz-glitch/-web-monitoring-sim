@@ -2,39 +2,64 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Web Monitoring - Demo</title>
+  <title>Web Monitoring — Realtime Demo</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <!-- Tailwind via CDN for quick styling -->
   <script src="https://cdn.tailwindcss.com"></script>
-  <style>
-    body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
-    .status-online { color: #16a34a; font-weight: 600; }
-    .status-offline { color: #dc2626; font-weight: 700; }
-    .log-area { height: 220px; overflow: auto; background: #0f172a; color: #cbd5e1; padding: 0.75rem; border-radius: 0.375rem; }
-  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body class="bg-slate-50 p-6">
-  <div class="max-w-6xl mx-auto">
-    <h1 class="text-2xl font-semibold mb-4">Web Monitoring — Real-time Demo</h1>
+<body class="bg-slate-50 text-slate-800">
+  <div class="container mx-auto p-6">
+    <h1 class="text-2xl font-semibold mb-4">Web Monitoring — Realtime Demo</h1>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-      <div class="md:col-span-2 bg-white p-4 rounded shadow">
-        <h2 class="text-lg font-medium mb-2">Devices</h2>
-        <table class="w-full text-sm" id="devices-table">
-          <thead>
-            <tr class="text-left text-slate-500">
-              <th>Name</th><th>IP</th><th>Status</th><th>Bandwidth (Mbps)</th><th>History</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+    <div id="status-banner" class="mb-4 text-sm text-slate-600"></div>
 
-        <div class="mt-6">
-          <h3 class="text-md font-medium mb-2">Realtime Bandwidth (last samples)</h3>
-          <canvas id="bandwidthChart" height="120"></canvas>
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-2 space-y-4">
+        <div class="bg-white rounded shadow p-4">
+          <h2 class="font-medium mb-2">Devices</h2>
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-xs text-slate-500">
+                <th class="p-2">Name</th>
+                <th class="p-2">IP</th>
+                <th class="p-2">Status</th>
+                <th class="p-2">Band In (Mbps)</th>
+                <th class="p-2">Band Out (Mbps)</th>
+              </tr>
+            </thead>
+            <tbody id="devices-body"></tbody>
+          </table>
+        </div>
+
+        <div class="bg-white rounded shadow p-4">
+          <h2 class="font-medium mb-2">Realtime Bandwidth (last samples)</h2>
+          <canvas id="bandwidthChart" height="140"></canvas>
         </div>
       </div>
 
-      <div class="bg-white p-4 rounded shadow">
-        <h2 class="text-lg font-medium mb-2">Logs / Alerts</h2>
-        <div id="
+      <div class="space-y-4">
+        <div class="bg-white rounded shadow p-4 h-64 overflow-auto">
+          <h2 class="font-medium mb-2">Logs / Alerts</h2>
+          <ul id="logs" class="text-sm space-y-2"></ul>
+        </div>
+
+        <div class="bg-white rounded shadow p-4">
+          <h2 class="font-medium mb-2">Controls</h2>
+          <p class="text-sm text-slate-600">Polling interval: ~2s. Use the buttons to refresh history or toggle simulation mode (server restart required to change SIMULATE env).</p>
+          <div class="mt-3 flex gap-2">
+            <button id="refresh-history" class="px-3 py-1 bg-blue-600 text-white rounded">Reload history</button>
+            <a href="/api/devices" target="_blank" class="px-3 py-1 bg-slate-100 rounded text-slate-700">Open /api/devices</a>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="mt-6 text-xs text-slate-500">
+      Demo — Express + Socket.IO — Simulated devices
+    </footer>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
