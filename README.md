@@ -90,5 +90,3 @@ If you want, I can:
 - Add Dockerfile + docker-compose,
 - Add SNMP polling example,
 - Push this to a GitHub repo or create a zip file for download.
-
-Enjoy!
