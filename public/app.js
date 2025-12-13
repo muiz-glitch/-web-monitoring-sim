@@ -4,15 +4,18 @@
   const logsEl = document.getElementById("logs");
   const devicesBody = document.getElementById("devices-body");
   const refreshBtn = document.getElementById("refresh-history");
+  const statusBanner = document.getElementById("status-banner");
+
+  function setBanner(text, isError = false) {
+    statusBanner.textContent = text;
+    statusBanner.style.color = isError ? "#b91c1c" : "";
+  }
 
   // Chart setup
   const ctx = document.getElementById("bandwidthChart").getContext("2d");
   const chartConfig = {
     type: "line",
-    data: {
-      labels: [],
-      datasets: []
-    },
+    data: { labels: [], datasets: [] },
     options: {
       animation: false,
       parsing: false,
@@ -21,9 +24,7 @@
         x: { type: "time", time: { unit: "second" }, ticks: { autoSkip: true, maxTicksLimit: 20 } },
         y: { beginAtZero: true, title: { display: true, text: "Mbps" } }
       },
-      plugins: {
-        legend: { display: true }
-      }
+      plugins: { legend: { display: true } }
     }
   };
   const bandwidthChart = new Chart(ctx, chartConfig);
@@ -38,6 +39,12 @@
 
   function renderDevices() {
     devicesBody.innerHTML = "";
+    if (!devices || devices.length === 0) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td class="p-2" colspan="5">No devices to display (check server /api/devices)</td>`;
+      devicesBody.appendChild(tr);
+      return;
+    }
     devices.forEach(d => {
       const tr = document.createElement("tr");
       tr.className = "border-t";
@@ -52,9 +59,8 @@
     });
   }
 
-  // Manage chart datasets (one dataset per device 'in' and 'out' optionally)
   function ensureDatasets(devList) {
-    const colors = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd"];
+    const colors = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd","#8c564b","#e377c2"];
     chartConfig.data.datasets = [];
     devList.forEach((d, idx) => {
       chartConfig.data.datasets.push({
@@ -79,71 +85,93 @@
   }
 
   async function loadInitialHistory() {
-    // fetch devices and populate datasets
-    const resp = await fetch("/api/devices");
-    const devs = await resp.json();
-    devices = devs;
-    renderDevices();
-    ensureDatasets(devices);
+    setBanner("Loading devices...");
+    try {
+      const resp = await fetch("/api/devices");
+      if (!resp.ok) throw new Error(`/api/devices returned ${resp.status}`);
+      const devs = await resp.json();
+      console.log("Fetched /api/devices:", devs);
+      devices = devs;
+      renderDevices();
+      ensureDatasets(devices);
 
-    // load per-device history and append to chart datasets
-    for (let i = 0; i < devices.length; i++) {
-      const d = devices[i];
-      try {
-        const r = await fetch(`/api/devices/${encodeURIComponent(d.id)}/history`);
-        const hist = await r.json();
-        hist.forEach(s => {
-          // push in and out to dataset pairs
-          const time = s.ts;
-          const inDataset = chartConfig.data.datasets[i*2];
-          const outDataset = chartConfig.data.datasets[i*2 + 1];
-          inDataset.data.push({ x: time, y: s.in });
-          outDataset.data.push({ x: time, y: s.out });
-        });
-      } catch (err) {
-        console.warn("history load error", err);
+      // load histories
+      for (let i = 0; i < devices.length; i++) {
+        const d = devices[i];
+        try {
+          const r = await fetch(`/api/devices/${encodeURIComponent(d.id)}/history`);
+          if (!r.ok) { console.warn("history fetch failed for", d.id, r.status); continue; }
+          const hist = await r.json();
+          hist.forEach(s => {
+            const inDataset = chartConfig.data.datasets[i*2];
+            const outDataset = chartConfig.data.datasets[i*2 + 1];
+            inDataset.data.push({ x: s.ts, y: s.in });
+            outDataset.data.push({ x: s.ts, y: s.out });
+          });
+        } catch (err) {
+          console.warn("history load error for", d.id, err);
+        }
       }
+      bandwidthChart.update();
+      setBanner("Connected — waiting realtime updates");
+    } catch (err) {
+      console.error("Failed to load /api/devices:", err);
+      setBanner("Error loading devices: " + err.message, true);
+      devices = [];
+      renderDevices();
     }
-    bandwidthChart.update();
   }
 
   // Socket handlers
+  socket.on("connect", () => {
+    console.log("Socket connected:", socket.id);
+    setBanner("Realtime connected (socket id: " + socket.id + ")");
+  });
+  socket.on("connect_error", (err) => {
+    console.error("Socket connect_error:", err);
+    setBanner("Socket connect error: " + (err.message || err), true);
+  });
+  socket.on("disconnect", (reason) => {
+    console.log("Socket disconnected:", reason);
+    setBanner("Socket disconnected: " + reason, true);
+  });
+
   socket.on("snapshot", payload => {
+    console.log("snapshot:", payload);
     if (payload.devices) {
       devices = payload.devices;
       renderDevices();
       ensureDatasets(devices);
     }
-    if (payload.logs) {
-      payload.logs.slice(-100).forEach(addLog);
-    }
-    // load history for chart
+    if (payload.logs) payload.logs.slice(-100).forEach(addLog);
+    // load REST history as fallback
     loadInitialHistory();
   });
 
   socket.on("device:update", ({ id, sample, device }) => {
-    // update device in table
+    //console.log("device:update", id, sample, device);
     const idx = devices.findIndex(x => x.id === id);
     if (idx >= 0) {
       devices[idx] = { ...devices[idx], ...device };
       renderDevices();
-
-      // append to chart datasets
       const inDs = chartConfig.data.datasets[idx*2];
       const outDs = chartConfig.data.datasets[idx*2+1];
       const ts = sample.ts;
       inDs.data.push({ x: ts, y: sample.in });
       outDs.data.push({ x: ts, y: sample.out });
-
-      // keep dataset size reasonable
       const maxPoints = 300;
       inDs.data = inDs.data.slice(-maxPoints);
       outDs.data = outDs.data.slice(-maxPoints);
       bandwidthChart.update("none");
+    } else {
+      console.warn("Received update for unknown device:", id);
+      // reload devices to recover
+      loadInitialHistory();
     }
   });
 
   socket.on("log:new", entry => {
+    console.log("log:new", entry);
     addLog(entry);
   });
 
